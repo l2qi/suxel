@@ -1,0 +1,20 @@
+[package]
+name = "suxel-store-postgres"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Postgres storage backend for the Suxel durable execution runtime."
+
+[dependencies]
+suxel-core = { path = "../suxel-core" }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+sqlx = { workspace = true }
+
+[dev-dependencies]
+suxel-core = { path = "../suxel-core", features = ["testkit"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time"] }

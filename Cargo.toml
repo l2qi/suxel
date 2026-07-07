@@ -1,0 +1,59 @@
+[workspace]
+members = [
+    "crates/suxel-core",
+    "crates/suxel-store-sqlite",
+    "crates/suxel-store-postgres",
+    "crates/suxel-sweet",
+    "crates/suxel-api",
+    "crates/suxel-sandbox-e2b",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+async-trait = "0.1"
+thiserror = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", default-features = false }
+tracing = "0.1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+uuid = { version = "1", features = ["v7", "serde"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+anyhow = "1"
+rusqlite = { version = "0.34", features = ["bundled"] }
+r2d2 = "0.8"
+r2d2_sqlite = "0.27"
+tempfile = "3"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "macros"] }
+axum = "0.8"
+tower = "0.5"
+http-body-util = "0.1"
+async-stream = "0.3"
+futures-core = "0.3"
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "multipart"] }
+wiremock = "0.6"
+base64 = "0.22"
+
+# Sweet is pinned to the v0.3.7 release on GitHub (see the suxel-sweet and
+# suxel-sandbox-e2b manifests). For local development against a sibling Sweet
+# checkout on disk (../sweet), uncomment the [patch] block below to override
+# those git deps with path deps. Re-comment it (or `git checkout Cargo.lock`)
+# before committing so Cargo.lock keeps its pinned git+ sources — building with
+# the patch active rewrites those entries to path sources.
+# [patch."https://github.com/sweet/sweet"]
+# sweet-core = { path = "../sweet/crates/sweet-core" }
+# sweet-agent = { path = "../sweet/crates/sweet-agent" }
+# sweet-computer-use-core = { path = "../sweet/crates/sweet-computer-use-core" }
+# sweet-tool-derive = { path = "../sweet/crates/sweet-tool-derive" }
+# sweet-llm = { path = "../sweet/crates/sweet-llm" }
+# sweet-tools = { path = "../sweet/crates/sweet-tools" }
+# sweet-session = { path = "../sweet/crates/sweet-session" }
+# sweet-memory = { path = "../sweet/crates/sweet-memory" }
+# sweet-sandbox = { path = "../sweet/crates/sweet-sandbox" }
+# sweet-mcp = { path = "../sweet/crates/sweet-mcp" }

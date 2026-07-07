@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+    tags: ["v*"]
+  pull_request:
+    branches: [master]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -Dwarnings
+  RUSTDOCFLAGS: -Dwarnings
+
+jobs:
+  ci:
+    name: CI (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Mirrors scripts/check.sh — same flags, same feature selection. The run
+      # is hermetic: the Postgres store's integration tests skip without
+      # $SUXEL_TEST_POSTGRES_URL and the E2B live tests are `#[ignore]`d, so no
+      # database or sandbox is needed. Sweet is pulled from its pinned git tag.
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets --all-features
+
+      - name: Check compilation
+        run: cargo check --workspace
+
+      - name: Run tests
+        run: cargo test --workspace --all-features
+
+      - name: Check documentation
+        run: cargo doc --workspace --no-deps --all-features

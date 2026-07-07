@@ -1,0 +1,25 @@
+[package]
+name = "suxel-sandbox-e2b"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "E2B cloud-sandbox provider for the Suxel durable runtime's sandbox lifecycle."
+
+[dependencies]
+suxel-core = { path = "../suxel-core" }
+# Sweet is pinned to the v0.3.7 release tag (see suxel-sweet's note); for a local
+# sweet checkout, uncomment the [patch] block in the workspace-root Cargo.toml.
+sweet-core = { git = "https://github.com/sweet/sweet", tag = "v0.3.7" }
+sweet-computer-use-core = { git = "https://github.com/sweet/sweet", tag = "v0.3.7" }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true }
+thiserror = { workspace = true }
+base64 = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros"] }
+wiremock = { workspace = true }

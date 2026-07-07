@@ -1,0 +1,25 @@
+[package]
+name = "suxel-sweet"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Adapter that runs Sweet agents durably on the Suxel runtime."
+
+# Sweet is pinned to the v0.3.7 release tag. For local development against a
+# sibling sweet checkout, uncomment the [patch] block in the workspace-root
+# Cargo.toml (it redirects these git deps to ../sweet/crates/*).
+[dependencies]
+suxel-core = { path = "../suxel-core" }
+sweet-core = { git = "https://github.com/sweet/sweet", tag = "v0.3.7" }
+sweet-agent = { git = "https://github.com/sweet/sweet", tag = "v0.3.7" }
+async-trait = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+sweet-agent = { git = "https://github.com/sweet/sweet", tag = "v0.3.7", features = ["test-util"] }
+sweet-session = { git = "https://github.com/sweet/sweet", tag = "v0.3.7", features = ["sqlite"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time"] }
+tempfile = { workspace = true }
