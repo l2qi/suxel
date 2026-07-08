@@ -544,45 +544,41 @@ impl SignalStore for SqliteStore {
         Ok(())
     }
 
-    async fn take_unconsumed(&self, run_id: RunId) -> Result<Vec<Signal>> {
+    async fn take_signal(&self, run_id: RunId, name: &str) -> Result<Option<Signal>> {
         let mut conn = self.conn()?;
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(Error::storage)?;
-        let mut out = Vec::new();
-        {
-            let mut stmt = tx
-                .prepare(
-                    "SELECT name, payload, created_at FROM signals \
-                     WHERE run_id=?1 AND consumed=0 ORDER BY id",
-                )
-                .map_err(Error::storage)?;
-            let rows = stmt
-                .query_map(params![run_id.to_string()], |row| {
-                    let name: String = row.get(0)?;
+        let row = tx
+            .query_row(
+                "SELECT id, payload, created_at FROM signals \
+                 WHERE run_id=?1 AND name=?2 AND consumed=0 ORDER BY id LIMIT 1",
+                params![run_id.to_string(), name],
+                |row| {
+                    let id: i64 = row.get(0)?;
                     let payload: String = row.get(1)?;
                     let created_at: i64 = row.get(2)?;
-                    Ok((name, payload, created_at))
-                })
-                .map_err(Error::storage)?;
-            for r in rows {
-                let (name, payload, created_at) = r.map_err(Error::storage)?;
-                out.push(Signal {
+                    Ok((id, payload, created_at))
+                },
+            )
+            .optional()
+            .map_err(Error::storage)?;
+        let result = match row {
+            Some((id, payload, created_at)) => {
+                tx.execute("UPDATE signals SET consumed=1 WHERE id=?1", params![id])
+                    .map_err(Error::storage)?;
+                Some(Signal {
                     run_id,
-                    name,
+                    name: name.to_string(),
                     payload: serde_json::from_str(&payload)?,
                     created_at: dt(created_at),
                     consumed: true,
-                });
+                })
             }
-        }
-        tx.execute(
-            "UPDATE signals SET consumed=1 WHERE run_id=?1 AND consumed=0",
-            params![run_id.to_string()],
-        )
-        .map_err(Error::storage)?;
+            None => None,
+        };
         tx.commit().map_err(Error::storage)?;
-        Ok(out)
+        Ok(result)
     }
 
     async fn has_unconsumed(&self, run_id: RunId, name: &str) -> Result<bool> {

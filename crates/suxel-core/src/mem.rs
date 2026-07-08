@@ -214,17 +214,18 @@ impl SignalStore for InMemoryBackend {
         Ok(())
     }
 
-    async fn take_unconsumed(&self, run_id: RunId) -> Result<Vec<Signal>> {
+    async fn take_signal(&self, run_id: RunId, name: &str) -> Result<Option<Signal>> {
         let mut g = self.lock();
         let Some(sigs) = g.signals.get_mut(&run_id) else {
-            return Ok(Vec::new());
+            return Ok(None);
         };
-        let mut taken = Vec::new();
-        for s in sigs.iter_mut().filter(|s| !s.consumed) {
-            s.consumed = true;
-            taken.push(s.clone());
+        for s in sigs.iter_mut() {
+            if !s.consumed && s.name == name {
+                s.consumed = true;
+                return Ok(Some(s.clone()));
+            }
         }
-        Ok(taken)
+        Ok(None)
     }
 
     async fn has_unconsumed(&self, run_id: RunId, name: &str) -> Result<bool> {

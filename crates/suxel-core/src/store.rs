@@ -96,8 +96,10 @@ pub trait Queue: Send + Sync {
 pub trait SignalStore: Send + Sync {
     /// Deliver a signal to a run.
     async fn deliver(&self, run_id: RunId, name: &str, payload: serde_json::Value) -> Result<()>;
-    /// Return all unconsumed signals for a run, marking them consumed.
-    async fn take_unconsumed(&self, run_id: RunId) -> Result<Vec<Signal>>;
+    /// Atomically consume and return the earliest unconsumed signal named `name`,
+    /// or `None` if there is none. Other unconsumed signals are left intact, so a
+    /// run never loses a delivered signal it did not take this turn.
+    async fn take_signal(&self, run_id: RunId, name: &str) -> Result<Option<Signal>>;
     /// Whether the run has an unconsumed signal with the given name (no consume).
     async fn has_unconsumed(&self, run_id: RunId, name: &str) -> Result<bool>;
 }

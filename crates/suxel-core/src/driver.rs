@@ -16,7 +16,7 @@ use crate::event::EventKind;
 use crate::ids::{ArtifactId, ResourceId, RunId};
 use crate::resource::{Resource, ResourceKind, ResourceStatus};
 use crate::run::{JoinMode, Run, RunStatus};
-use crate::signal::{ApprovalResolution, Signal, APPROVAL_SIGNAL};
+use crate::signal::{ApprovalResolution, APPROVAL_SIGNAL};
 use crate::step::{RetryPolicy, StepKey, StepRecord, StepStatus};
 use crate::store::Backend;
 use async_trait::async_trait;
@@ -121,7 +121,6 @@ pub trait AgentDriver: Send + Sync {
 pub struct RunContext {
     backend: Arc<dyn Backend>,
     run: Run,
-    signals: Option<Vec<Signal>>,
     usage_delta: BudgetUsage,
 }
 
@@ -130,7 +129,6 @@ impl RunContext {
         RunContext {
             backend,
             run,
-            signals: None,
             usage_delta: BudgetUsage::default(),
         }
     }
@@ -190,39 +188,28 @@ impl RunContext {
         self.usage_delta.tool_calls += 1;
     }
 
-    async fn load_signals(&mut self) -> Result<&[Signal]> {
-        if self.signals.is_none() {
-            let sigs = self.backend.take_unconsumed(self.run.id).await?;
-            self.signals = Some(sigs);
-        }
-        Ok(self.signals.as_deref().unwrap())
-    }
-
-    /// Take the payload of the first unconsumed signal with `name`, if present.
+    /// Take the payload of the earliest unconsumed signal with `name`, if present.
+    /// Consumes only that one signal — any other delivered signals (including
+    /// further ones with the same name) stay unconsumed for a later take.
     pub async fn take_signal(&mut self, name: &str) -> Result<Option<serde_json::Value>> {
-        self.load_signals().await?;
-        let sigs = self.signals.as_mut().unwrap();
-        if let Some(pos) = sigs.iter().position(|s| s.name == name) {
-            return Ok(Some(sigs.remove(pos).payload));
-        }
-        Ok(None)
+        Ok(self
+            .backend
+            .take_signal(self.run.id, name)
+            .await?
+            .map(|s| s.payload))
     }
 
-    /// Take all approval resolutions delivered since the run parked.
+    /// Take all approval resolutions delivered since the run parked. A payload
+    /// that fails to decode surfaces as an error rather than being silently
+    /// dropped (which would leave the run parked forever).
     pub async fn take_approvals(&mut self) -> Result<Vec<ApprovalResolution>> {
-        self.load_signals().await?;
-        let sigs = self.signals.as_mut().unwrap();
         let mut out = Vec::new();
-        let mut i = 0;
-        while i < sigs.len() {
-            if sigs[i].name == APPROVAL_SIGNAL {
-                let s = sigs.remove(i);
-                if let Ok(res) = serde_json::from_value::<ApprovalResolution>(s.payload) {
-                    out.push(res);
-                }
-            } else {
-                i += 1;
-            }
+        while let Some(s) = self
+            .backend
+            .take_signal(self.run.id, APPROVAL_SIGNAL)
+            .await?
+        {
+            out.push(serde_json::from_value(s.payload)?);
         }
         Ok(out)
     }

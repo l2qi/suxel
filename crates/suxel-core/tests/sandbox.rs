@@ -8,10 +8,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use suxel_core::driver::{Advance, AgentDriver, RunContext};
+use suxel_core::resource::ResourceStatus;
 use suxel_core::sandbox::{
     provision_sandbox, reap_sandboxes, sandbox_resource, sandbox_resource_of, SandboxHandle,
     SandboxProvider,
 };
+use suxel_core::store::ResourceStore;
 use suxel_core::{Engine, InMemoryBackend, RunSpec, RunStatus};
 
 /// A fake provider that counts create/destroy calls.
@@ -113,6 +115,75 @@ async fn provisions_once_reattaches_then_reaps() {
         1,
         "sandbox was not reaped"
     );
+}
+
+/// A provider whose `destroy` always fails, to prove reaping does not discard
+/// the lease (and thus the handle to a live, billable VM) on a teardown failure.
+struct FailingDestroyProvider {
+    destroy_attempts: AtomicUsize,
+}
+
+#[async_trait]
+impl SandboxProvider for FailingDestroyProvider {
+    async fn create(&self) -> Result<SandboxHandle, String> {
+        Ok(SandboxHandle::with_metadata(
+            "sb-x",
+            serde_json::json!({ "domain": "mock.dev" }),
+        ))
+    }
+    async fn destroy(&self, _sandbox_id: &str) -> Result<(), String> {
+        self.destroy_attempts.fetch_add(1, Ordering::SeqCst);
+        Err("destroy failed".into())
+    }
+}
+
+struct ReapDriver {
+    provider: Arc<FailingDestroyProvider>,
+}
+
+#[async_trait]
+impl AgentDriver for ReapDriver {
+    async fn advance(&self, ctx: &mut RunContext) -> suxel_core::Result<Advance> {
+        provision_sandbox(ctx, &*self.provider).await?;
+        reap_sandboxes(ctx, &*self.provider).await?;
+        Ok(Advance::Complete {
+            output: serde_json::json!({}),
+        })
+    }
+}
+
+#[tokio::test]
+async fn reap_keeps_lease_when_destroy_fails() {
+    let provider = Arc::new(FailingDestroyProvider {
+        destroy_attempts: AtomicUsize::new(0),
+    });
+    let backend = Arc::new(InMemoryBackend::new());
+    let engine = Engine::new(backend.clone()).with_driver(
+        "reap",
+        Arc::new(ReapDriver {
+            provider: provider.clone(),
+        }),
+    );
+    let id = engine
+        .create_run(RunSpec {
+            agent_type: "reap".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    engine.run_until_idle("w").await.unwrap();
+
+    assert_eq!(
+        provider.destroy_attempts.load(Ordering::SeqCst),
+        1,
+        "reap must attempt destroy"
+    );
+    // destroy failed, so the lease stays Active — the handle is retained for a
+    // later reap instead of being discarded (which would leak the VM).
+    let resources = backend.list_resources(id).await.unwrap();
+    assert_eq!(resources.len(), 1);
+    assert_eq!(resources[0].status, ResourceStatus::Active);
+    assert_eq!(resources[0].metadata["sandbox_id"], "sb-x");
 }
 
 #[tokio::test]

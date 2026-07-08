@@ -499,6 +499,45 @@ pub async fn assert_resource_and_artifact(backend: Arc<dyn Backend>) {
     assert_eq!(artifacts[0].kind, "report");
 }
 
+/// Signals are consumed one at a time by name: taking one leaves every other
+/// delivered signal — including later ones of the same name — intact. A run must
+/// never lose a signal it was delivered but did not take this turn.
+pub async fn assert_signals_selective_consume(backend: Arc<dyn Backend>) {
+    let engine = Engine::new(backend.clone());
+    let id = engine
+        .create_run(RunSpec {
+            agent_type: "x".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    backend.deliver(id, "a", json!(1)).await.unwrap();
+    backend.deliver(id, "b", json!(2)).await.unwrap();
+    backend.deliver(id, "a", json!(3)).await.unwrap();
+
+    // Take one "a": get the earliest, and "b" plus the later "a" survive.
+    let first = backend
+        .take_signal(id, "a")
+        .await
+        .unwrap()
+        .expect("first a");
+    assert_eq!(first.payload, json!(1));
+    assert!(
+        backend.has_unconsumed(id, "b").await.unwrap(),
+        "an untaken signal must not be consumed"
+    );
+    let second = backend
+        .take_signal(id, "a")
+        .await
+        .unwrap()
+        .expect("second a");
+    assert_eq!(second.payload, json!(3));
+    assert!(backend.take_signal(id, "a").await.unwrap().is_none());
+    let b = backend.take_signal(id, "b").await.unwrap().expect("b");
+    assert_eq!(b.payload, json!(2));
+}
+
 /// Run the full conformance suite against `backend` (a fresh, empty backend).
 /// Each scenario creates its own runs, so they can share one backend.
 pub async fn run_all(make_backend: impl Fn() -> Arc<dyn Backend>) {
@@ -506,6 +545,7 @@ pub async fn run_all(make_backend: impl Fn() -> Arc<dyn Backend>) {
     assert_durable_step_once(make_backend()).await;
     assert_retries(make_backend()).await;
     assert_signal_park_resume(make_backend()).await;
+    assert_signals_selective_consume(make_backend()).await;
     assert_approval_park_resume(make_backend()).await;
     assert_denied_approval_fails(make_backend()).await;
     assert_join_all(make_backend()).await;

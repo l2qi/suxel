@@ -226,6 +226,13 @@ impl AgentIo for DurableIo {
 /// durable-step journal: a re-run (worker crash + re-claim, or in-turn retry)
 /// with the same arguments returns the saved result instead of re-executing the
 /// side effect. Only successful results are journaled (errors stay retryable).
+///
+/// The memoization key is `(run_id, tool_name, args)`, so **two calls with
+/// identical arguments in one run are treated as the same step** — the second
+/// returns the first's saved result and its side effect is *not* re-run. Only
+/// wrap tools whose repeated identical-args calls are safe to collapse this way
+/// (pure reads, idempotent effects). Do not wrap a tool whose two identical
+/// calls are meant to have distinct effects (e.g. "append the same line twice").
 pub fn wrap_tool(spec: ToolSpec, run_id: RunId, backend: Arc<dyn Backend>) -> ToolSpec {
     let handler = Arc::new(DurableToolHandler {
         inner: spec.handler.clone(),

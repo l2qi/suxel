@@ -477,27 +477,31 @@ impl SignalStore for PostgresStore {
         Ok(())
     }
 
-    async fn take_unconsumed(&self, run_id: RunId) -> Result<Vec<Signal>> {
-        // Mark-and-return atomically.
-        let rows = sqlx::query_as::<_, RawSignal>(
-            "UPDATE signals SET consumed=TRUE WHERE run_id=$1 AND consumed=FALSE \
-             RETURNING name, payload, created_at",
+    async fn take_signal(&self, run_id: RunId, name: &str) -> Result<Option<Signal>> {
+        // Mark-and-return the earliest matching signal atomically; the row lock
+        // (SKIP LOCKED) keeps concurrent consumers from taking the same one.
+        let row = sqlx::query_as::<_, RawSignal>(
+            "UPDATE signals SET consumed=TRUE WHERE id = ( \
+                 SELECT id FROM signals \
+                 WHERE run_id=$1 AND name=$2 AND consumed=FALSE \
+                 ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED \
+             ) RETURNING name, payload, created_at",
         )
         .bind(run_id.to_string())
-        .fetch_all(&self.pool)
+        .bind(name)
+        .fetch_optional(&self.pool)
         .await
         .map_err(Error::storage)?;
-        rows.into_iter()
-            .map(|r| {
-                Ok(Signal {
-                    run_id,
-                    name: r.name,
-                    payload: serde_json::from_str(&r.payload)?,
-                    created_at: dt(r.created_at),
-                    consumed: true,
-                })
+        row.map(|r| {
+            Ok(Signal {
+                run_id,
+                name: r.name,
+                payload: serde_json::from_str(&r.payload)?,
+                created_at: dt(r.created_at),
+                consumed: true,
             })
-            .collect()
+        })
+        .transpose()
     }
 
     async fn has_unconsumed(&self, run_id: RunId, name: &str) -> Result<bool> {

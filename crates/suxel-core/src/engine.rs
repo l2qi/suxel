@@ -172,9 +172,19 @@ impl Engine {
         let Some(lease) = self.backend.claim(worker_id, self.lease_ttl).await? else {
             return Ok(false);
         };
-        let res = self.process(lease.item).await;
-        self.backend.ack(&lease).await?;
-        res?;
+        match self.process(lease.item).await {
+            Ok(()) => self.backend.ack(&lease).await?,
+            Err(e) => {
+                // Do NOT ack: leaving the entry leased lets it redeliver once the
+                // lease expires — the same path a crashed worker takes — so the run
+                // is retried rather than stranded mid-flight with no queue entry.
+                tracing::error!(
+                    run = %lease.item,
+                    error = %e,
+                    "run processing failed; leaving for redelivery"
+                );
+            }
+        }
         Ok(true)
     }
 
@@ -266,6 +276,18 @@ impl Engine {
                 }
             }
             Advance::WaitForApproval { request } => {
+                if self.backend.has_unconsumed(run.id, APPROVAL_SIGNAL).await? {
+                    // An approval was delivered while we were processing (before
+                    // this park committed); don't park — reprocess so the driver
+                    // consumes it. Mirrors the WaitForSignal pre-park check and
+                    // closes the deliver-before-park race that would hang the run.
+                    run.status = RunStatus::Pending;
+                    run.waiting = None;
+                    run.updated_at = now;
+                    self.backend.update_run(&run).await?;
+                    self.backend.enqueue(run.id, None).await?;
+                    return Ok(());
+                }
                 run.status = RunStatus::WaitingApproval;
                 run.waiting = Some(Wait::Approval);
                 run.updated_at = now;

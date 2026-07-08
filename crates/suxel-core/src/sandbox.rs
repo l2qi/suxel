@@ -134,8 +134,18 @@ pub async fn reap_sandboxes(ctx: &RunContext, provider: &dyn SandboxProvider) ->
     for r in ctx.resources().await? {
         if r.kind == ResourceKind::CodeSandbox && r.status == ResourceStatus::Active {
             if let Some(id) = r.metadata.get("sandbox_id").and_then(|v| v.as_str()) {
-                let _ = provider.destroy(id).await;
-                ctx.release_resource(r.id).await?;
+                match provider.destroy(id).await {
+                    // Release the lease only after the VM is actually gone.
+                    Ok(()) => ctx.release_resource(r.id).await?,
+                    // Keep the lease Active so a later reap retries destroy —
+                    // releasing now would discard the only handle to a live,
+                    // billable VM and guarantee a leak on a transient failure.
+                    Err(e) => tracing::warn!(
+                        sandbox = id,
+                        error = %e,
+                        "sandbox destroy failed; keeping lease for a later reap"
+                    ),
+                }
             }
         }
     }
