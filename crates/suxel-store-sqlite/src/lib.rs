@@ -25,6 +25,9 @@ use suxel_core::ids::{ArtifactId, ResourceId, RunId};
 use suxel_core::resource::{Resource, ResourceStatus};
 use suxel_core::run::Run;
 use suxel_core::signal::Signal;
+use suxel_core::sql_encoding::{
+    dt, ms, opt_value_to_json, parse_run_id, run_from_row, to_json, RunRow, RUN_COLUMNS,
+};
 use suxel_core::step::{StepKey, StepRecord};
 use suxel_core::store::{
     ArtifactStore, Clock, EventLog, Lease, Queue, ResourceStore, RunStore, SignalStore, StepStore,
@@ -156,51 +159,10 @@ CREATE TABLE IF NOT EXISTS queue (
 CREATE INDEX IF NOT EXISTS idx_queue_ready ON queue(ready_at);
 "#;
 
-// ---- serialization helpers --------------------------------------------------
+// ---- run row reader ---------------------------------------------------------
 
-fn ms(dt: DateTime<Utc>) -> i64 {
-    dt.timestamp_millis()
-}
-
-fn dt(ms: i64) -> DateTime<Utc> {
-    DateTime::from_timestamp_millis(ms).unwrap_or_default()
-}
-
-fn to_json<T: serde::Serialize>(v: &T) -> Result<String> {
-    serde_json::to_string(v).map_err(Error::from)
-}
-
-fn opt_value_to_json(v: &Option<serde_json::Value>) -> Option<String> {
-    v.as_ref().map(|v| v.to_string())
-}
-
-fn parse_run_id(s: &str) -> Result<RunId> {
-    s.parse::<RunId>().map_err(Error::storage)
-}
-
-/// Raw column values for a `runs` row, converted to a `Run` after fetch.
-struct RawRun {
-    id: String,
-    parent_id: Option<String>,
-    agent_type: String,
-    goal: String,
-    input: Option<String>,
-    status: String,
-    waiting: Option<String>,
-    session_ref: Option<String>,
-    budget: String,
-    usage: String,
-    output: Option<String>,
-    error: Option<String>,
-    created_at: i64,
-    updated_at: i64,
-}
-
-const RUN_COLUMNS: &str = "id, parent_id, agent_type, goal, input, status, waiting, \
-                           session_ref, budget, usage, output, error, created_at, updated_at";
-
-fn read_raw_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawRun> {
-    Ok(RawRun {
+fn read_raw_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunRow> {
+    Ok(RunRow {
         id: row.get(0)?,
         parent_id: row.get(1)?,
         agent_type: row.get(2)?,
@@ -215,25 +177,6 @@ fn read_raw_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawRun> {
         error: row.get(11)?,
         created_at: row.get(12)?,
         updated_at: row.get(13)?,
-    })
-}
-
-fn raw_to_run(r: RawRun) -> Result<Run> {
-    Ok(Run {
-        id: parse_run_id(&r.id)?,
-        parent_id: r.parent_id.as_deref().map(parse_run_id).transpose()?,
-        agent_type: r.agent_type,
-        goal: r.goal,
-        input: r.input.map(|s| serde_json::from_str(&s)).transpose()?,
-        status: serde_json::from_str(&r.status)?,
-        waiting: r.waiting.map(|s| serde_json::from_str(&s)).transpose()?,
-        session_ref: r.session_ref,
-        budget: serde_json::from_str(&r.budget)?,
-        usage: serde_json::from_str(&r.usage)?,
-        output: r.output.map(|s| serde_json::from_str(&s)).transpose()?,
-        error: r.error,
-        created_at: dt(r.created_at),
-        updated_at: dt(r.updated_at),
     })
 }
 
@@ -279,7 +222,7 @@ impl RunStore for SqliteStore {
             )
             .optional()
             .map_err(Error::storage)?;
-        raw.ok_or(Error::RunNotFound(id)).and_then(raw_to_run)
+        raw.ok_or(Error::RunNotFound(id)).and_then(run_from_row)
     }
 
     async fn update_run(&self, run: &Run) -> Result<()> {
@@ -325,7 +268,7 @@ impl RunStore for SqliteStore {
             .map_err(Error::storage)?;
         let mut out = Vec::new();
         for r in rows {
-            out.push(raw_to_run(r.map_err(Error::storage)?)?);
+            out.push(run_from_row(r.map_err(Error::storage)?)?);
         }
         Ok(out)
     }

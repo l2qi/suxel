@@ -47,6 +47,7 @@ pub mod resource;
 pub mod run;
 pub mod sandbox;
 pub mod signal;
+pub mod sql_encoding;
 pub mod step;
 pub mod store;
 

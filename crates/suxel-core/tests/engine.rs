@@ -62,3 +62,13 @@ async fn budget_breach_fails_the_run() {
 async fn leases_resources_and_produces_artifacts() {
     testkit::assert_resource_and_artifact(backend()).await;
 }
+
+#[tokio::test]
+async fn selective_signal_consume() {
+    testkit::assert_signals_selective_consume(backend()).await;
+}
+
+#[tokio::test]
+async fn concurrent_appends_get_distinct_seqs() {
+    testkit::assert_concurrent_appends_distinct_seq(backend()).await;
+}

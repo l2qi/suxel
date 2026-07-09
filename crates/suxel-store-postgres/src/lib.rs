@@ -22,6 +22,9 @@ use suxel_core::ids::{ArtifactId, ResourceId, RunId};
 use suxel_core::resource::{Resource, ResourceStatus};
 use suxel_core::run::Run;
 use suxel_core::signal::Signal;
+use suxel_core::sql_encoding::{
+    dt, ms, opt_value_to_json, parse_run_id, run_from_row, to_json, RunRow, RUN_COLUMNS,
+};
 use suxel_core::step::{StepKey, StepRecord};
 use suxel_core::store::{
     ArtifactStore, Clock, EventLog, Lease, Queue, ResourceStore, RunStore, SignalStore, StepStore,
@@ -144,28 +147,10 @@ CREATE TABLE IF NOT EXISTS queue (
 CREATE INDEX IF NOT EXISTS idx_queue_ready ON queue(ready_at);
 "#;
 
-// ---- helpers ----------------------------------------------------------------
+// ---- run row reader ---------------------------------------------------------
 
-fn ms(dt: DateTime<Utc>) -> i64 {
-    dt.timestamp_millis()
-}
-
-fn dt(ms: i64) -> DateTime<Utc> {
-    DateTime::from_timestamp_millis(ms).unwrap_or_default()
-}
-
-fn to_json<T: serde::Serialize>(v: &T) -> Result<String> {
-    serde_json::to_string(v).map_err(Error::from)
-}
-
-fn opt_value_to_json(v: &Option<serde_json::Value>) -> Option<String> {
-    v.as_ref().map(|v| v.to_string())
-}
-
-fn parse_run_id(s: &str) -> Result<RunId> {
-    s.parse::<RunId>().map_err(Error::storage)
-}
-
+/// `sqlx::FromRow` carrier for a `runs` row; converted to the shared [`RunRow`]
+/// (`FromRow` can't be derived on the core type from this crate).
 #[derive(FromRow)]
 struct RawRun {
     id: String,
@@ -184,26 +169,25 @@ struct RawRun {
     updated_at: i64,
 }
 
-const RUN_COLUMNS: &str = "id, parent_id, agent_type, goal, input, status, waiting, \
-                           session_ref, budget, usage, output, error, created_at, updated_at";
-
-fn raw_to_run(r: RawRun) -> Result<Run> {
-    Ok(Run {
-        id: parse_run_id(&r.id)?,
-        parent_id: r.parent_id.as_deref().map(parse_run_id).transpose()?,
-        agent_type: r.agent_type,
-        goal: r.goal,
-        input: r.input.map(|s| serde_json::from_str(&s)).transpose()?,
-        status: serde_json::from_str(&r.status)?,
-        waiting: r.waiting.map(|s| serde_json::from_str(&s)).transpose()?,
-        session_ref: r.session_ref,
-        budget: serde_json::from_str(&r.budget)?,
-        usage: serde_json::from_str(&r.usage)?,
-        output: r.output.map(|s| serde_json::from_str(&s)).transpose()?,
-        error: r.error,
-        created_at: dt(r.created_at),
-        updated_at: dt(r.updated_at),
-    })
+impl From<RawRun> for RunRow {
+    fn from(r: RawRun) -> Self {
+        RunRow {
+            id: r.id,
+            parent_id: r.parent_id,
+            agent_type: r.agent_type,
+            goal: r.goal,
+            input: r.input,
+            status: r.status,
+            waiting: r.waiting,
+            session_ref: r.session_ref,
+            budget: r.budget,
+            usage: r.usage,
+            output: r.output,
+            error: r.error,
+            created_at: r.created_at,
+            updated_at: r.updated_at,
+        }
+    }
 }
 
 // ---- RunStore ---------------------------------------------------------------
@@ -242,7 +226,8 @@ impl RunStore for PostgresStore {
                 .fetch_optional(&self.pool)
                 .await
                 .map_err(Error::storage)?;
-        raw.ok_or(Error::RunNotFound(id)).and_then(raw_to_run)
+        raw.ok_or(Error::RunNotFound(id))
+            .and_then(|r| run_from_row(r.into()))
     }
 
     async fn update_run(&self, run: &Run) -> Result<()> {
@@ -282,7 +267,7 @@ impl RunStore for PostgresStore {
         .fetch_all(&self.pool)
         .await
         .map_err(Error::storage)?;
-        raws.into_iter().map(raw_to_run).collect()
+        raws.into_iter().map(|r| run_from_row(r.into())).collect()
     }
 }
 

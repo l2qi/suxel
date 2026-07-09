@@ -130,6 +130,11 @@ pub async fn sandbox_resource_of(backend: &dyn Backend, run_id: RunId) -> Result
 
 /// Destroy and release every sandbox leased to the run — call on completion,
 /// cancellation, or cleanup so no paid VM is left running.
+///
+/// Call this at **teardown only**. [`provision_sandbox`] memoizes its create in a
+/// durable step, so calling `provision_sandbox` again *after* a reap returns the
+/// already-destroyed sandbox id from the journal instead of creating a fresh VM —
+/// don't reap and then re-provision within the same run.
 pub async fn reap_sandboxes(ctx: &RunContext, provider: &dyn SandboxProvider) -> Result<()> {
     for r in ctx.resources().await? {
         if r.kind == ResourceKind::CodeSandbox && r.status == ResourceStatus::Active {

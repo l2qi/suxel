@@ -25,7 +25,6 @@ tracing = "0.1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 uuid = { version = "1", features = ["v7", "serde"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
-anyhow = "1"
 rusqlite = { version = "0.34", features = ["bundled"] }
 r2d2 = "0.8"
 r2d2_sqlite = "0.27"
