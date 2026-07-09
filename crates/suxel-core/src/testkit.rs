@@ -538,6 +538,41 @@ pub async fn assert_signals_selective_consume(backend: Arc<dyn Backend>) {
     assert_eq!(b.payload, json!(2));
 }
 
+/// Concurrent appends to one run get distinct, contiguous seqs — no two collide
+/// on the `(run_id, seq)` key. Guards the per-backend serialization a worker tick
+/// racing an external signal/approve/cancel append on the same run relies on.
+pub async fn assert_concurrent_appends_distinct_seq(backend: Arc<dyn Backend>) {
+    let engine = Engine::new(backend.clone());
+    let id = engine
+        .create_run(RunSpec {
+            agent_type: "x".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    // create_run already appended RunCreated (seq 1); fire N concurrent appends.
+    const N: u64 = 24;
+    let mut handles = Vec::new();
+    for _ in 0..N {
+        let b = backend.clone();
+        handles.push(tokio::spawn(async move {
+            b.append(id, EventKind::ToolCallRecorded, json!({})).await
+        }));
+    }
+    for h in handles {
+        h.await
+            .expect("append task panicked")
+            .expect("append failed");
+    }
+
+    let events = backend.read(id, 0).await.unwrap();
+    let mut seqs: Vec<u64> = events.iter().map(|e| e.seq).collect();
+    seqs.sort_unstable();
+    let expected: Vec<u64> = (1..=(N + 1)).collect(); // +1 for the RunCreated event
+    assert_eq!(seqs, expected, "concurrent appends must get distinct seqs");
+}
+
 /// Run the full conformance suite against `backend` (a fresh, empty backend).
 /// Each scenario creates its own runs, so they can share one backend.
 pub async fn run_all(make_backend: impl Fn() -> Arc<dyn Backend>) {
@@ -546,6 +581,7 @@ pub async fn run_all(make_backend: impl Fn() -> Arc<dyn Backend>) {
     assert_retries(make_backend()).await;
     assert_signal_park_resume(make_backend()).await;
     assert_signals_selective_consume(make_backend()).await;
+    assert_concurrent_appends_distinct_seq(make_backend()).await;
     assert_approval_park_resume(make_backend()).await;
     assert_denied_approval_fails(make_backend()).await;
     assert_join_all(make_backend()).await;

@@ -81,8 +81,11 @@ remove them cleanly. Intentional, documented breaks; never silent ones or churn 
 In order:
 
 1. **Correctness** — tests pass, including the full `--workspace --all-features` suite. The durability
-   guarantee is the product: a completed `durable_step` must never re-run its side effect, even across a
-   mid-step crash.
+   guarantee is the product: once a `durable_step`'s result is **journaled**, its side effect is never
+   re-run — a completed step is served from the journal, even across a crash. The one unavoidable window
+   is a crash *after* `f` succeeds but *before* its result is journaled: replay re-invokes `f` (so it is
+   at-least-once for un-journaled effects, like every durable runtime). Write `f` to be idempotent /
+   retry-safe when its side effect is not itself transactional.
 2. **Simplicity (KISS)** — the simplest solution that works. No defensive complexity, no speculative
    abstractions.
 3. **DRY** — no copy-paste logic. Shared logic lives in `suxel-core`; stores implement traits, they

@@ -258,10 +258,14 @@ struct DurableToolHandler {
 
 impl DurableToolHandler {
     fn step_key(&self, args: &serde_json::Value) -> String {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        args.to_string().hash(&mut hasher);
-        format!("tool:{}:{:x}", self.tool_name, hasher.finish())
+        // Key off the canonical JSON of the args (serde_json orders object keys,
+        // and `preserve_order` is not enabled), not a hash digest. This key is
+        // persisted in `durable_steps`, so it must be stable across toolchains:
+        // `DefaultHasher`'s output is explicitly unspecified across Rust releases,
+        // and a 64-bit digest can collide — either would silently re-run or return
+        // the wrong memoized side effect. The full string is deterministic and
+        // collision-free.
+        format!("tool:{}:{}", self.tool_name, args)
     }
 }
 

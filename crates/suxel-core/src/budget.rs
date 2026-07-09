@@ -16,8 +16,6 @@ pub struct Budget {
     pub max_tokens: Option<u64>,
     /// Max total cost in USD.
     pub max_cost_usd: Option<f64>,
-    /// Max wall-clock seconds (enforced by the engine via timers, advisory here).
-    pub max_wall_clock_secs: Option<u64>,
     /// Max number of tool calls.
     pub max_tool_calls: Option<u64>,
     /// Max number of child runs this run may spawn.

@@ -6,7 +6,7 @@
 //! every transition durable.
 
 use crate::driver::{Advance, AgentDriver, RunContext};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::event::EventKind;
 use crate::ids::RunId;
 use crate::run::{JoinMode, Run, RunSpec, RunStatus, Wait};
@@ -134,14 +134,16 @@ impl Engine {
     pub async fn cancel(&self, run_id: RunId) -> Result<()> {
         let top = match self.backend.get_run(run_id).await {
             Ok(r) => r,
-            Err(_) => return Ok(()),
+            Err(Error::RunNotFound(_)) => return Ok(()), // nothing to cancel
+            Err(e) => return Err(e), // a real storage error must not read as success
         };
         let now = self.backend.now();
         let mut stack = vec![run_id];
         while let Some(id) = stack.pop() {
             let mut r = match self.backend.get_run(id).await {
                 Ok(r) => r,
-                Err(_) => continue,
+                Err(Error::RunNotFound(_)) => continue, // child vanished; skip it
+                Err(e) => return Err(e),                // don't silently abort the cascade
             };
             if r.status.is_terminal() {
                 continue;

@@ -296,8 +296,18 @@ impl EventLog for PostgresStore {
         kind: EventKind,
         payload: serde_json::Value,
     ) -> Result<u64> {
-        // Assign the next seq atomically inside the insert. A run is normally
-        // advanced by a single worker, so contention here is rare.
+        // Assign the next seq inside a transaction that first takes a per-run
+        // advisory lock. External callers (signal/approve/cancel) append events
+        // concurrently with a worker tick on the same run, and `MAX(seq)+1` read
+        // under MVCC would otherwise let two appends compute the same seq and
+        // collide on the (run_id, seq) primary key. The lock serializes appends
+        // per run (it releases at COMMIT); appends to other runs are unaffected.
+        let mut tx = self.pool.begin().await.map_err(Error::storage)?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1)::bigint)")
+            .bind(run_id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(Error::storage)?;
         let seq: i64 = sqlx::query_scalar(
             "INSERT INTO events (run_id, seq, kind, payload, at) \
              VALUES ($1, (SELECT COALESCE(MAX(seq),0)+1 FROM events WHERE run_id=$1), $2, $3, $4) \
@@ -307,9 +317,10 @@ impl EventLog for PostgresStore {
         .bind(to_json(&kind)?)
         .bind(payload.to_string())
         .bind(ms(Utc::now()))
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *tx)
         .await
         .map_err(Error::storage)?;
+        tx.commit().await.map_err(Error::storage)?;
         Ok(seq as u64)
     }
 

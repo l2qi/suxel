@@ -304,10 +304,15 @@ impl RunContext {
         Ok(artifact.id)
     }
 
-    /// Run a durable, idempotent step. If a completed result is already journaled
-    /// under `key`, it is returned without re-running `f` — the "never repeat a
-    /// completed side effect" guarantee. Otherwise `f` runs with `retry` backoff;
-    /// the result is journaled before returning.
+    /// Run a durable step. If a completed result is already journaled under `key`,
+    /// it is returned without re-running `f` — the "never repeat a *journaled*
+    /// side effect" guarantee. Otherwise `f` runs with `retry` backoff and its
+    /// result is journaled before returning.
+    ///
+    /// Note the one unavoidable window: if the process crashes after `f` succeeds
+    /// but before its result is journaled, replay re-invokes `f`. So an opaque
+    /// side effect is at-least-once; make `f` idempotent / retry-safe (or itself
+    /// transactional) if that matters.
     pub async fn durable_step<T, F, Fut>(
         &mut self,
         key: impl Into<StepKey>,

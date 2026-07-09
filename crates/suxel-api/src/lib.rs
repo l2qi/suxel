@@ -202,18 +202,27 @@ async fn stream_events(
     let engine = state.engine.clone();
     let mut cursor = q.from.unwrap_or(0);
 
+    // Close the stream with an `error` event after this many consecutive backend
+    // failures (~5s at the poll interval) instead of spinning silently forever.
+    const MAX_CONSECUTIVE_ERRORS: u32 = 20;
+
     let stream = async_stream::stream! {
+        let mut errors = 0u32;
         loop {
-            if let Ok(events) = engine.backend().read(run_id, cursor).await {
-                for e in events {
-                    cursor = e.seq;
-                    if let Ok(ev) = SseEvent::default().json_data(&e) {
-                        yield Ok(ev);
+            let mut had_error = false;
+            match engine.backend().read(run_id, cursor).await {
+                Ok(events) => {
+                    for e in events {
+                        cursor = e.seq;
+                        if let Ok(ev) = SseEvent::default().json_data(&e) {
+                            yield Ok(ev);
+                        }
                     }
                 }
+                Err(_) => had_error = true,
             }
-            if let Ok(run) = engine.get_run(run_id).await {
-                if run.status.is_terminal() {
+            match engine.get_run(run_id).await {
+                Ok(run) if run.status.is_terminal() => {
                     // Final flush: the terminal event (e.g. RunCompleted) may
                     // have been committed after our last read. Read again so no
                     // event is lost before we close the stream.
@@ -227,6 +236,19 @@ async fn stream_events(
                     yield Ok(SseEvent::default().event("done").data("{}"));
                     break;
                 }
+                Ok(_) => {}
+                Err(_) => had_error = true,
+            }
+            if had_error {
+                errors += 1;
+                if errors >= MAX_CONSECUTIVE_ERRORS {
+                    yield Ok(SseEvent::default()
+                        .event("error")
+                        .data(r#"{"error":"stream backend unavailable"}"#));
+                    break;
+                }
+            } else {
+                errors = 0;
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
