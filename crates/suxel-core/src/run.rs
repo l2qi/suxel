@@ -60,6 +60,10 @@ pub enum Wait {
     Signal {
         /// The signal name to resume on.
         name: String,
+        /// Deadline for a `WaitForSignal { timeout }`; once it has elapsed the run
+        /// resumes as timed out. `None` waits indefinitely.
+        #[serde(default)]
+        deadline: Option<DateTime<Utc>>,
     },
     /// A human approval decision.
     Approval,

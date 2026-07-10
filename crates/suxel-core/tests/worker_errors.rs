@@ -12,11 +12,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use suxel_core::artifact::Artifact;
-use suxel_core::driver::{Advance, AgentDriver, RunContext};
+use suxel_core::driver::{Advance, AgentDriver, ChildSpec, RunContext};
 use suxel_core::error::{Error, Result};
 use suxel_core::event::{Event, EventKind};
 use suxel_core::ids::{ResourceId, RunId};
 use suxel_core::resource::Resource;
+use suxel_core::run::JoinMode;
 use suxel_core::run::Run;
 use suxel_core::signal::Signal;
 use suxel_core::step::StepRecord;
@@ -247,6 +248,195 @@ async fn fence_prevents_concurrent_double_advance() {
     );
     assert_eq!(
         backend.get_run(id).await.unwrap().status,
+        RunStatus::Completed
+    );
+}
+
+/// A slow turn (run is Running while it advances), then waits on a signal. A
+/// signal delivered during the slow turn is seen by `signal()` as Running and
+/// does not wake the run — only the post-commit re-check saves it.
+struct SlowSignalWaitDriver;
+#[async_trait]
+impl AgentDriver for SlowSignalWaitDriver {
+    async fn advance(&self, ctx: &mut RunContext) -> Result<Advance> {
+        if ctx.take_signal("go").await?.is_some() {
+            return Ok(Advance::Complete {
+                output: serde_json::json!({}),
+            });
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        Ok(Advance::WaitForSignal {
+            name: "go".into(),
+            timeout: None,
+        })
+    }
+}
+
+#[tokio::test]
+async fn signal_delivered_during_running_is_not_lost() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let engine =
+        Arc::new(Engine::new(backend.clone()).with_driver("wait", Arc::new(SlowSignalWaitDriver)));
+    let id = engine
+        .create_run(RunSpec {
+            agent_type: "wait".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    let e = engine.clone();
+    let worker = tokio::spawn(async move { e.run_until_idle("w").await });
+    // Deliver while the first turn is mid-advance (run Running): signal() sees
+    // Running and won't wake it, so only the post-commit re-check prevents a hang.
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    engine
+        .signal(id, "go", serde_json::json!({}))
+        .await
+        .unwrap();
+    worker.await.unwrap().unwrap();
+
+    assert_eq!(
+        backend.get_run(id).await.unwrap().status,
+        RunStatus::Completed
+    );
+}
+
+/// Waits on a signal with a timeout; fails distinctly when the timeout fires.
+struct TimeoutDriver;
+#[async_trait]
+impl AgentDriver for TimeoutDriver {
+    async fn advance(&self, ctx: &mut RunContext) -> Result<Advance> {
+        if ctx.take_signal("go").await?.is_some() {
+            return Ok(Advance::Complete {
+                output: serde_json::json!({ "got": "signal" }),
+            });
+        }
+        if ctx.timed_out() {
+            return Ok(Advance::Fail {
+                error: "signal timed out".into(),
+                retry: false,
+            });
+        }
+        Ok(Advance::WaitForSignal {
+            name: "go".into(),
+            timeout: Some(Duration::from_millis(40)),
+        })
+    }
+}
+
+#[tokio::test]
+async fn wait_for_signal_timeout_resumes_as_timed_out() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let engine = Engine::new(backend.clone()).with_driver("t", Arc::new(TimeoutDriver));
+    let id = engine
+        .create_run(RunSpec {
+            agent_type: "t".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    // No signal: parks with a 40ms timeout (the timer entry is not yet ready).
+    engine.run_until_idle("w").await.unwrap();
+    assert_eq!(
+        backend.get_run(id).await.unwrap().status,
+        RunStatus::WaitingSignal
+    );
+
+    // After the timeout the timer fires; the driver sees timed_out() and fails
+    // distinctly instead of re-polling forever.
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    engine.run_until_idle("w").await.unwrap();
+    let run = backend.get_run(id).await.unwrap();
+    assert_eq!(run.status, RunStatus::Failed);
+    assert_eq!(run.error.as_deref(), Some("signal timed out"));
+}
+
+/// Spawns one child of `child` and joins All, then completes.
+struct Spawner {
+    child: String,
+}
+#[async_trait]
+impl AgentDriver for Spawner {
+    async fn advance(&self, ctx: &mut RunContext) -> Result<Advance> {
+        if ctx.children().await?.is_empty() {
+            Ok(Advance::SpawnChildren {
+                specs: vec![ChildSpec {
+                    agent_type: self.child.clone(),
+                    ..Default::default()
+                }],
+                join: JoinMode::All,
+            })
+        } else {
+            Ok(Advance::Complete {
+                output: serde_json::json!({}),
+            })
+        }
+    }
+}
+
+/// Parks forever on a signal that never arrives.
+struct Parker;
+#[async_trait]
+impl AgentDriver for Parker {
+    async fn advance(&self, _ctx: &mut RunContext) -> Result<Advance> {
+        Ok(Advance::WaitForSignal {
+            name: "never".into(),
+            timeout: None,
+        })
+    }
+}
+
+#[tokio::test]
+async fn cancel_propagates_up_a_deep_tree() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let engine = Engine::new(backend.clone())
+        .with_driver(
+            "top",
+            Arc::new(Spawner {
+                child: "mid".into(),
+            }),
+        )
+        .with_driver(
+            "mid",
+            Arc::new(Spawner {
+                child: "leaf".into(),
+            }),
+        )
+        .with_driver("leaf", Arc::new(Parker));
+    let top = engine
+        .create_run(RunSpec {
+            agent_type: "top".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    engine.run_until_idle("w").await.unwrap();
+
+    // top → mid → leaf, with leaf parked.
+    let mid = backend.list_children(top).await.unwrap()[0].id;
+    let leaf = backend.list_children(mid).await.unwrap()[0].id;
+    assert_eq!(
+        backend.get_run(leaf).await.unwrap().status,
+        RunStatus::WaitingSignal
+    );
+
+    // Cancel the leaf: mid's join is now satisfied → mid completes → top's join is
+    // satisfied → top completes. Propagation up the tree via join re-evaluation.
+    engine.cancel(leaf).await.unwrap();
+    engine.run_until_idle("w").await.unwrap();
+
+    assert_eq!(
+        backend.get_run(leaf).await.unwrap().status,
+        RunStatus::Cancelled
+    );
+    assert_eq!(
+        backend.get_run(mid).await.unwrap().status,
+        RunStatus::Completed
+    );
+    assert_eq!(
+        backend.get_run(top).await.unwrap().status,
         RunStatus::Completed
     );
 }

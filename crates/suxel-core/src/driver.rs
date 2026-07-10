@@ -81,7 +81,10 @@ pub enum Advance {
     WaitForSignal {
         /// Signal name to resume on.
         name: String,
-        /// Optional timeout after which the run is re-enqueued anyway.
+        /// Optional deadline: if the signal has not arrived within this duration,
+        /// the run resumes anyway with [`RunContext::timed_out`] set true, so the
+        /// driver can fail or take another path instead of waiting forever.
+        /// Re-waiting restarts the timer.
         timeout: Option<Duration>,
     },
     /// Park until the given instant.
@@ -122,15 +125,26 @@ pub struct RunContext {
     backend: Arc<dyn Backend>,
     run: Run,
     usage_delta: BudgetUsage,
+    timed_out: bool,
 }
 
 impl RunContext {
-    pub(crate) fn new(backend: Arc<dyn Backend>, run: Run) -> Self {
+    pub(crate) fn new(backend: Arc<dyn Backend>, run: Run, timed_out: bool) -> Self {
         RunContext {
             backend,
             run,
             usage_delta: BudgetUsage::default(),
+            timed_out,
         }
+    }
+
+    /// Whether this turn was resumed because a [`Advance::WaitForSignal`]'s
+    /// `timeout` fired *without* the signal arriving — as opposed to the signal
+    /// itself, or a fresh turn. A driver uses this to enforce a real deadline
+    /// (fail, or take a different path) instead of re-waiting indefinitely; it is
+    /// `false` on a signal-driven or first-turn advance.
+    pub fn timed_out(&self) -> bool {
+        self.timed_out
     }
 
     pub(crate) fn into_usage_delta(self) -> BudgetUsage {

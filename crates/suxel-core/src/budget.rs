@@ -3,9 +3,11 @@
 
 //! Per-run budgets and their running usage.
 //!
-//! A [`Budget`] caps how much a run (and its fan-out) may consume. Children
-//! inherit a slice of the parent's budget; the engine checks usage after every
-//! `advance` and fails the run if any limit is breached.
+//! A [`Budget`] caps how much a run (and its fan-out) may consume. A child
+//! inherits a copy of the parent's ceiling; on join the children's usage rolls
+//! up into the parent, so the parent's ceiling bounds total fan-out spend. The
+//! engine checks usage after every `advance` and fails the run if any limit is
+//! breached.
 
 use serde::{Deserialize, Serialize};
 

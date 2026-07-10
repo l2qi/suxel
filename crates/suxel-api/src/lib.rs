@@ -192,6 +192,11 @@ async fn get_events(
 /// then streams new events (poll-based, backend-agnostic) until the run reaches
 /// a terminal state, ending with a `done` event. Resumable — a reconnecting
 /// client passes the last seq it saw as `from`.
+///
+/// Each connected client independently polls the backend on a fixed interval
+/// (below), so load is `N clients × 2 queries / interval`. That is fine for a UI
+/// with a handful of listeners; at high fan-out a backend LISTEN/NOTIFY (Postgres)
+/// or a shared in-process broadcast would scale better. Deliberate v1 tradeoff.
 async fn stream_events(
     State(state): State<AppState>,
     Path(id): Path<String>,

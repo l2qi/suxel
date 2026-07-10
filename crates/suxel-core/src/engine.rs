@@ -103,7 +103,7 @@ impl Engine {
             .await?;
         let mut run = self.backend.get_run(run_id).await?;
         if run.status == RunStatus::WaitingSignal {
-            let matches = matches!(&run.waiting, Some(Wait::Signal { name: n }) if n == name);
+            let matches = matches!(&run.waiting, Some(Wait::Signal { name: n, .. }) if n == name);
             if matches {
                 self.wake(&mut run).await?;
             }
@@ -244,16 +244,24 @@ impl Engine {
         if run.status.is_terminal() {
             return Ok(());
         }
+        let now = self.backend.now();
+        // Timed out iff the WaitForSignal deadline has actually elapsed — read from
+        // the recorded deadline, not inferred from "re-claimed while still parked",
+        // so a future direct re-enqueue of a parked run can't spuriously set it.
+        let timed_out = matches!(
+            &run.waiting,
+            Some(Wait::Signal { deadline: Some(d), .. }) if *d <= now
+        );
         let Some(driver) = self.drivers.get(&run.agent_type).cloned() else {
             let msg = format!("no driver for agent_type {:?}", run.agent_type);
             return self.finish_failed(run, msg).await;
         };
 
         run.status = RunStatus::Running;
-        run.updated_at = self.backend.now();
+        run.updated_at = now;
         self.backend.update_run(&run).await?;
 
-        let mut ctx = RunContext::new(self.backend.clone(), run.clone());
+        let mut ctx = RunContext::new(self.backend.clone(), run.clone(), timed_out);
         let advanced = driver.advance(&mut ctx).await;
         run.usage.add(&ctx.into_usage_delta());
 
@@ -305,22 +313,18 @@ impl Engine {
                 }
             }
             Advance::WaitForApproval { request } => {
-                if self.backend.has_unconsumed(run.id, APPROVAL_SIGNAL).await? {
-                    // An approval was delivered while we were processing (before
-                    // this park committed); don't park — reprocess so the driver
-                    // consumes it. Mirrors the WaitForSignal pre-park check and
-                    // closes the deliver-before-park race that would hang the run.
-                    run.status = RunStatus::Pending;
-                    run.waiting = None;
-                    run.updated_at = now;
-                    self.backend.update_run(&run).await?;
-                    self.backend.enqueue(run.id, None).await?;
-                    return Ok(());
-                }
                 run.status = RunStatus::WaitingApproval;
                 run.waiting = Some(Wait::Approval);
                 run.updated_at = now;
                 self.backend.update_run(&run).await?;
+                // Double-check *after* committing the park: an approval delivered
+                // in the window before this commit was seen by approve() as Running
+                // (not WaitingApproval), so it did not wake the run. Re-checking now
+                // closes that lost-wakeup race — any pre-commit delivery is visible
+                // here; any post-commit one is seen by approve() as Waiting.
+                if self.backend.has_unconsumed(run.id, APPROVAL_SIGNAL).await? {
+                    return self.wake(&mut run).await;
+                }
                 self.backend
                     .append(
                         run.id,
@@ -331,23 +335,26 @@ impl Engine {
                 Ok(())
             }
             Advance::WaitForSignal { name, timeout } => {
-                if self.backend.has_unconsumed(run.id, &name).await? {
-                    // The signal already arrived; don't park.
-                    run.status = RunStatus::Pending;
-                    run.waiting = None;
-                    run.updated_at = now;
-                    self.backend.update_run(&run).await?;
-                    self.backend.enqueue(run.id, None).await?;
-                    return Ok(());
-                }
+                // One deadline, recorded on the wait and used to schedule the timer,
+                // so `timed_out` later reads the same instant.
+                let deadline = timeout.map(|t| {
+                    now + chrono::Duration::from_std(t)
+                        .unwrap_or_else(|_| chrono::Duration::seconds(1))
+                });
                 run.status = RunStatus::WaitingSignal;
-                run.waiting = Some(Wait::Signal { name });
+                run.waiting = Some(Wait::Signal {
+                    name: name.clone(),
+                    deadline,
+                });
                 run.updated_at = now;
                 self.backend.update_run(&run).await?;
-                if let Some(t) = timeout {
-                    let ready = now
-                        + chrono::Duration::from_std(t)
-                            .unwrap_or_else(|_| chrono::Duration::seconds(1));
+                // Double-check after committing the park (same race as approval): a
+                // signal delivered before this commit was seen by signal() as
+                // Running and did not wake the run, so re-check and un-park now.
+                if self.backend.has_unconsumed(run.id, &name).await? {
+                    return self.wake(&mut run).await;
+                }
+                if let Some(ready) = deadline {
                     self.backend.enqueue(run.id, Some(ready)).await?;
                 }
                 Ok(())
@@ -479,6 +486,12 @@ impl Engine {
                 )
                 .await?;
             if satisfied {
+                // Roll the children's spend up into the parent so its budget bounds
+                // total fan-out cost. Charged once, here: the parent leaves the join
+                // on this wake, so a later `on_child_terminal` early-returns above.
+                for c in &children {
+                    parent.usage.add(&c.usage);
+                }
                 self.wake(&mut parent).await?;
                 if let JoinMode::Any = mode {
                     for c in &children {
