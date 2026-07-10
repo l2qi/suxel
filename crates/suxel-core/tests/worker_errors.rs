@@ -7,7 +7,7 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -49,6 +49,12 @@ impl RunStore for FaultyBackend {
     }
     async fn list_children(&self, parent: RunId) -> Result<Vec<Run>> {
         self.inner.list_children(parent).await
+    }
+    async fn try_acquire_run(&self, id: RunId, lease_ttl: Duration) -> Result<bool> {
+        self.inner.try_acquire_run(id, lease_ttl).await
+    }
+    async fn release_run(&self, id: RunId) -> Result<()> {
+        self.inner.release_run(id).await
     }
 }
 
@@ -183,6 +189,64 @@ async fn process_error_surfaces_and_run_redelivers() {
     engine.run_until_idle("w").await.unwrap();
     assert_eq!(
         inner.get_run(id).await.unwrap().status,
+        RunStatus::Completed
+    );
+}
+
+/// Enters `advance` (counting entries), holds the turn in-flight, then completes,
+/// so a second worker attempting the same run would overlap the first.
+struct SlowCountingDriver {
+    entered: Arc<AtomicUsize>,
+}
+#[async_trait]
+impl AgentDriver for SlowCountingDriver {
+    async fn advance(&self, _ctx: &mut RunContext) -> Result<Advance> {
+        self.entered.fetch_add(1, Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        Ok(Advance::Complete {
+            output: serde_json::json!({}),
+        })
+    }
+}
+
+#[tokio::test]
+async fn fence_prevents_concurrent_double_advance() {
+    use suxel_core::store::Queue;
+
+    let backend = Arc::new(InMemoryBackend::new());
+    let entered = Arc::new(AtomicUsize::new(0));
+    let engine = Arc::new(Engine::new(backend.clone()).with_driver(
+        "slow",
+        Arc::new(SlowCountingDriver {
+            entered: entered.clone(),
+        }),
+    ));
+    let id = engine
+        .create_run(RunSpec {
+            agent_type: "slow".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    // create_run enqueued one entry; add a second ready entry for the same run,
+    // reproducing the "two ready rows for one run" hazard.
+    backend.enqueue(id, None).await.unwrap();
+
+    // Two workers race the two entries. The run fence must let only one enter
+    // `advance` — without it, both would drive the turn concurrently.
+    let (e1, e2) = (engine.clone(), engine.clone());
+    let a = tokio::spawn(async move { e1.tick("A").await });
+    let b = tokio::spawn(async move { e2.tick("B").await });
+    a.await.unwrap().unwrap();
+    b.await.unwrap().unwrap();
+
+    assert_eq!(
+        entered.load(Ordering::SeqCst),
+        1,
+        "the run was advanced by two workers concurrently"
+    );
+    assert_eq!(
+        backend.get_run(id).await.unwrap().status,
         RunStatus::Completed
     );
 }

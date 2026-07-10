@@ -83,7 +83,8 @@ CREATE TABLE IF NOT EXISTS runs (
     output      TEXT,
     error       TEXT,
     created_at  BIGINT NOT NULL,
-    updated_at  BIGINT NOT NULL
+    updated_at  BIGINT NOT NULL,
+    proc_lease_until BIGINT
 );
 CREATE INDEX IF NOT EXISTS idx_runs_parent ON runs(parent_id);
 
@@ -268,6 +269,31 @@ impl RunStore for PostgresStore {
         .await
         .map_err(Error::storage)?;
         raws.into_iter().map(|r| run_from_row(r.into())).collect()
+    }
+
+    async fn try_acquire_run(&self, id: RunId, lease_ttl: Duration) -> Result<bool> {
+        let now = ms(Utc::now());
+        let until = now + lease_ttl.as_millis() as i64;
+        let result = sqlx::query(
+            "UPDATE runs SET proc_lease_until=$2 \
+             WHERE id=$1 AND (proc_lease_until IS NULL OR proc_lease_until<=$3)",
+        )
+        .bind(id.to_string())
+        .bind(until)
+        .bind(now)
+        .execute(&self.pool)
+        .await
+        .map_err(Error::storage)?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    async fn release_run(&self, id: RunId) -> Result<()> {
+        sqlx::query("UPDATE runs SET proc_lease_until=NULL WHERE id=$1")
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await
+            .map_err(Error::storage)?;
+        Ok(())
     }
 }
 

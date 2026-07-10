@@ -44,6 +44,7 @@ struct Inner {
     resources: HashMap<ResourceId, Resource>,
     artifacts: HashMap<RunId, Vec<Artifact>>,
     queue: Vec<QueueEntry>,
+    proc_leases: HashMap<RunId, DateTime<Utc>>,
 }
 
 /// In-memory backend. Cheap to clone-wrap in an `Arc`.
@@ -103,6 +104,23 @@ impl RunStore for InMemoryBackend {
             .collect();
         kids.sort_by_key(|r| r.created_at);
         Ok(kids)
+    }
+
+    async fn try_acquire_run(&self, id: RunId, lease_ttl: Duration) -> Result<bool> {
+        let mut g = self.lock();
+        let now = Utc::now();
+        if g.proc_leases.get(&id).is_some_and(|&until| until > now) {
+            return Ok(false); // a live lease is held
+        }
+        let ttl =
+            chrono::Duration::from_std(lease_ttl).unwrap_or_else(|_| chrono::Duration::seconds(30));
+        g.proc_leases.insert(id, now + ttl);
+        Ok(true)
+    }
+
+    async fn release_run(&self, id: RunId) -> Result<()> {
+        self.lock().proc_leases.remove(&id);
+        Ok(())
     }
 }
 

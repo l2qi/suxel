@@ -95,7 +95,8 @@ CREATE TABLE IF NOT EXISTS runs (
     output      TEXT,
     error       TEXT,
     created_at  INTEGER NOT NULL,
-    updated_at  INTEGER NOT NULL
+    updated_at  INTEGER NOT NULL,
+    proc_lease_until INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_runs_parent ON runs(parent_id);
 
@@ -271,6 +272,30 @@ impl RunStore for SqliteStore {
             out.push(run_from_row(r.map_err(Error::storage)?)?);
         }
         Ok(out)
+    }
+
+    async fn try_acquire_run(&self, id: RunId, lease_ttl: Duration) -> Result<bool> {
+        let conn = self.conn()?;
+        let now = ms(Utc::now());
+        let until = now + lease_ttl.as_millis() as i64;
+        let affected = conn
+            .execute(
+                "UPDATE runs SET proc_lease_until=?2 \
+                 WHERE id=?1 AND (proc_lease_until IS NULL OR proc_lease_until<=?3)",
+                params![id.to_string(), until, now],
+            )
+            .map_err(Error::storage)?;
+        Ok(affected == 1)
+    }
+
+    async fn release_run(&self, id: RunId) -> Result<()> {
+        self.conn()?
+            .execute(
+                "UPDATE runs SET proc_lease_until=NULL WHERE id=?1",
+                params![id.to_string()],
+            )
+            .map_err(Error::storage)?;
+        Ok(())
     }
 }
 

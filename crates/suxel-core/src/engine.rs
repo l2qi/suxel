@@ -218,9 +218,31 @@ impl Engine {
     // ---- internals -----------------------------------------------------------
 
     async fn process(&self, run_id: RunId) -> Result<()> {
+        // Cheap pre-check: skip a stale queue entry for an already-finished run
+        // without taking the processing lease.
+        if self.backend.get_run(run_id).await?.status.is_terminal() {
+            return Ok(());
+        }
+        // Fence the run: the queue lease guards a row, not the run, so a second
+        // ready entry for the same run could otherwise drive a concurrent advance
+        // under another worker. If the lease is already held, drop this duplicate
+        // claim (the caller acks the queue entry).
+        if !self.backend.try_acquire_run(run_id, self.lease_ttl).await? {
+            return Ok(());
+        }
+        let result = self.advance_once(run_id).await;
+        // Release the fence so the next enqueue/claim can advance the run; a crash
+        // mid-advance leaves it to expire via the lease TTL instead.
+        let _ = self.backend.release_run(run_id).await;
+        result
+    }
+
+    async fn advance_once(&self, run_id: RunId) -> Result<()> {
+        // Re-read under the fence: the run may have reached a terminal state
+        // between the pre-check and acquiring the lease.
         let mut run = self.backend.get_run(run_id).await?;
         if run.status.is_terminal() {
-            return Ok(()); // stale queue entry for an already-finished run
+            return Ok(());
         }
         let Some(driver) = self.drivers.get(&run.agent_type).cloned() else {
             let msg = format!("no driver for agent_type {:?}", run.agent_type);

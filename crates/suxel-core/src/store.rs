@@ -55,6 +55,14 @@ pub trait RunStore: Send + Sync {
     async fn update_run(&self, run: &Run) -> Result<()>;
     /// List a run's direct children.
     async fn list_children(&self, parent: RunId) -> Result<Vec<Run>>;
+    /// Atomically take an exclusive processing lease on the run so a second queue
+    /// entry for it can't drive a concurrent `advance`. Returns `false` if a live
+    /// lease is already held; a crashed holder's lease expires after `lease_ttl`,
+    /// letting another worker re-acquire. Independent of the queue-entry lease,
+    /// which guards a row, not the run.
+    async fn try_acquire_run(&self, id: RunId, lease_ttl: Duration) -> Result<bool>;
+    /// Release the processing lease taken by [`Self::try_acquire_run`].
+    async fn release_run(&self, id: RunId) -> Result<()>;
 }
 
 /// The append-only event log.
