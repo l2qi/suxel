@@ -169,28 +169,33 @@ impl Engine {
 
     // ---- worker loop ---------------------------------------------------------
 
-    /// Claim and process one ready run. Returns `false` if nothing was ready.
+    /// Claim and process one ready run. Returns `Ok(false)` if nothing was ready,
+    /// `Ok(true)` after one is processed. On a processing error the claim is left
+    /// leased (so it redelivers on lease expiry) and the error is **returned**,
+    /// not acked-and-swallowed — a caller must not read a failure as "done".
     pub async fn tick(&self, worker_id: &str) -> Result<bool> {
         let Some(lease) = self.backend.claim(worker_id, self.lease_ttl).await? else {
             return Ok(false);
         };
         match self.process(lease.item).await {
-            Ok(()) => self.backend.ack(&lease).await?,
-            Err(e) => {
-                // Do NOT ack: leaving the entry leased lets it redeliver once the
-                // lease expires — the same path a crashed worker takes — so the run
-                // is retried rather than stranded mid-flight with no queue entry.
-                tracing::error!(
-                    run = %lease.item,
-                    error = %e,
-                    "run processing failed; leaving for redelivery"
-                );
+            Ok(()) => {
+                self.backend.ack(&lease).await?;
+                Ok(true)
             }
+            // Do NOT ack: leaving the entry leased lets it redeliver once the lease
+            // expires — the same path a crashed worker takes — so the run is retried
+            // rather than stranded. Return the error so it surfaces (`run_worker`
+            // logs it and moves on; `run_until_idle` propagates it) instead of being
+            // swallowed while the run sits parked mid-lease.
+            Err(e) => Err(e),
         }
-        Ok(true)
     }
 
-    /// Process all currently-ready runs, then return. (Test/embedded helper.)
+    /// Process currently-ready runs until none remain, then return `Ok(())`.
+    /// (Test/embedded helper.) Returns `Err` if a run's processing fails on a
+    /// backend error: that run is left leased and redelivers on lease expiry, so a
+    /// caller can retry once the lease clears — the failure is surfaced, never
+    /// silently reported as idle.
     pub async fn run_until_idle(&self, worker_id: &str) -> Result<()> {
         while self.tick(worker_id).await? {}
         Ok(())
